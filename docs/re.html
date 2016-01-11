@@ -1,0 +1,174 @@
+<html>
+	<head>
+		<title>Regular Expressions in Erlang</title>
+	<style>
+		body { width: 500px; 
+			margin-left: 70px; 
+			margin-top: 40px;
+			text-align: justify; }
+		.old_news {
+			font-size: xx-small;
+		}
+	</style>
+	</head>
+	<body>
+
+		<h1>Implementatoin of regular expressions in pure Erlang</h1>
+
+		<p><b>28-Oct-2007</b> Small mistake was fixed, when regexp module were crashing on 
+		re:first_match("b", ".*c"), instead giving nomatch.
+		<hr style='width: 50%; border: 1px solid gray; '/>
+		</p>
+		
+
+
+		<p> In you tried to use regexp module from base erlang distribution or
+		gregexp from jungerl, you noticed, that they work quite slow and are
+		not usable to real text extraction tasks.</p>
+
+		<p>You can download <a
+			href="http://zanazan.am/erlang/re.erl">regular expressions library</a> which is implemented in a pure erlang.
+		There is no examples , ut it's quote compatible with existing regexp module.
+		Additinal functions are provided to ease text extraction (m, mg, mgg, mall, mallg, mallgg) which 
+		are worth to try.</p>
+
+	<h3>Internals description</h3>
+<pre>
+First of all - after parsing RE to tree I begin to optimize it's 
+structure, joining consequential chars to strings,
+
+char_class, comp_class optimizations - there are separate cases for
+1 char - it is stored as just 1 integer
+1 range of symbols - it is stored  as  a tuple
+until 30 non adjacent symbols  -- it is stored as a list
+more than 30 non adjacent symbols in a char class  -- they are converted 
+to tuple of size 256 with true/false values - for faster lookups
+
+there is also some internal transformations of the RE, so after 
+transform it is a list with following elements:
+
+{const, "string"} -- match a constant string
+{kclosure, RE} -- match RE 0 or more times (* quantifier)
+{kclosure_ng, RE} -- match RE 0 or more times -- non greedy (*? quantifier)
+{closure, {0, Max}, RE} -- match RE from 0 to Max times ({N,M} 
+quantifier -- it's quite useful and implemented in perl regexps)
+{char_class, Class}, {comp_class, Class} - character class and it's 
+negation (for instance [a-z] and [^a-z0-9] classes)
+{match, RE} - extract submatch corresponding to embedded RE
+any_symbol - special case for . symbol (matches anything but \n)
+
+all RE embedded in a commands are also lists of same commands.
+
+This is more convenient structure to process, than tree which is 
+constructed with nested tuples.
+
+
+Second part is a RE interpreter optimization:
+
+First speed up was that regexp/gregexp do practically linear scan of 
+incoming string, in case if you can just exactly to some position -- 
+i.e. if you have constant string in the begin of the RE, you can 
+directly just to it's first match and try to match whole RE there. Old 
+modules tried to cut one symbol if RE is not matched and try matching 
+again. The same is done it the first part of the pattern is a char_class 
+or comp_class.
+
+char class match optimizations -- I've described above -- for different 
+char_class sizes different structures are used.
+
+{kclosure, RE_kclos} optimization -- (g)regexp were trying to execute 
+BOTH paths (with pattern and without pattern) and find maximal match. 
+This highly recursive call (not a tail recursion, btw) is replaced with 
+tail recursion call, which tries match one pattern a time and then 
+decide go apply more RE_kclos patterns or try match remaining RE.
+
+{kclosure_ng, RE_kclos) (non greedy) was the easiest in optimization - 
+try remaining RE, if we matched -- we are finished, if not -- try apply 
+RE_kclos, if it matched -- apply RE again, if not -- report that we 
+cannot match pattern in this position. It's up to previous expressions
+in a chain to decide how to change match position.
+
+Same optimization is done for {closure, {0, Max}, RE} expression, which 
+is matched in a greedy manner. There is no non-gredy implementation now, 
+but it should be added.
+
+There is also special optimizations for cases:
+.*?string
+.*?(string)
+
+so, .*? part, which in practice matches any symbol is just jumped over 
+and not matched by one symbol every time. In this case . means really - 
+any symbol, even \n, so I'm thinking of changing any_symbol 
+specification and make it match any symbol.
+
+
+About benchmars:
+
+regexp/gregexp were hanging on my task :) I where matching
+text.*?text1.*?text2.*?text3 pattern to 18 Kb file.
+
+I've tried to use profiler -- fprof just hang after eating several gigs 
+of trace.log, cover was more successful.
+
+Regexp/gregexp called re_apply_list (main entry function in a re 
+matching loop) about 3,200,000 times on a 18Kb file.
+My regexp implementatin for the same pattern called re_apply_list
+for class=g.*?&lt;a\s+class=l\s+href=\"(.*?)\"&gt;(.*?)&lt;/a&gt; pattern on a same 
+18Kb file about 160 times)
+
+re.erl now spends most of it's time in the lists:nthtail and strings:str 
+functions and this is difficult to optimize more.
+
+I had also major slowdown in extracting string matches/submatches (m*g, 
+m*gg functions), but now it is solved also -- and you are recommended to 
+use them to extract submatches -- because it will works only on the 
+remainder of the string, which decreases scan time on the list -- and 
+thus produce results faster).
+</pre>
+
+<h3>Benchmarking</h3>
+<pre>
+
+on the same 18kb html file:
+pattern: class=g.*&lt;a\s+class
+
+regexp from trapexit/original regexp - work about 90-100ms
+gregexp from jungerl - work 80-87 ms
+mine -- 29-34ms
+
+on same file joined together 10 times (180kb)
+regexp from trapexit - 480-490 ms
+OTP regexp - 480-550 ms
+gregexp -- 478-490
+mine -- 310-327 ms
+
+same file joined 100 times (1800kb)
+mine works -- 3.2-3.7 seconds
+regexp from trapexit/regexp from OTP/gregexp - 4.6-5.1 seconds
+
+
+now increase complicity and try
+class=g.*&lt;a\s+class=l\s+href=\".*\"
+regexp
+
+on 18kb file
+mine works -- 60-75 ms
+another regexps - 270-280 ms
+
+If we use   class=g.*?&lt;a\s+?class=l\s+?href=\".*?\" pattern, which is 
+really what I meant to extract from file and what is really optimized in 
+my regexp interpreter -- mine works about 10-12 ms, another libraries 
+does not have non-greedy evaluation. I've modified gregexp to support 
+such operations and it return matches in this case in a 240-300 ms.
+</pre>
+
+
+		<p>
+		You can reach me by email -- Gaspar Chilingarov &lt;gasparch@gmail.com&gt;
+		</p>
+
+		<div style='position: fixed; width: 400px; height: auto; bottom: 0px; right: 0px; margin-left: auto; margin-right: auto;'>Hosted by <a href="http://zanazan.am/">zanazan.am</a> 
+		</div>
+
+	</body>
+</html>
